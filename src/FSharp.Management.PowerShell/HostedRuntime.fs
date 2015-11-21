@@ -13,6 +13,28 @@ type IPSRuntime =
     abstract member Execute     : string * obj seq -> obj
     abstract member GetXmlDoc   : string -> string
 
+type PowerShell with
+
+    /// throws if there is an error after invoking
+    member x.InvokeThrow() =
+        let o = x.Invoke()
+        if x.HadErrors then
+            let sb = Text.StringBuilder()
+            sb.AppendLine "failed PowerShell invoke" |> ignore
+            for error in x.Streams.Error do
+                sb.AppendLine (sprintf "%A" error) |> ignore
+            failwith (sb.ToString())
+        o
+
+type Runspaces.Runspace with
+
+    member x.CreateCommand (cmdlet:string) =
+        PowerShell.Create(Runspace=x).AddCommand(cmdlet)
+
+    member x.ImportModule name =
+        use c = x.CreateCommand("Import-Module").AddParameter("Name", name)
+        c.InvokeThrow() |> ignore
+
 /// PowerShell runtime built into the current process
 type PSRuntimeHosted(snapIns:string[], modules:string[]) =
     let runSpace =
@@ -21,30 +43,40 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
             initState.AuthorizationManager <- new Microsoft.PowerShell.PSAuthorizationManager("Microsoft.PowerShell")
             
             // Import SnapIns
-            for snapIn in snapIns do
-                if not <| String.IsNullOrEmpty(snapIn) then
-                    let _, ex = initState.ImportPSSnapIn(snapIn)
-                    if ex <> null then
-                        failwithf "ImportPSSnapInExceptions: %s" ex.Message
+//            for snapIn in snapIns do
+//                if not <| String.IsNullOrEmpty(snapIn) then
+//                    let _, ex = initState.ImportPSSnapIn(snapIn)
+//                    if ex <> null then
+//                        failwithf "ImportPSSnapInExceptions: %s" ex.Message
 
             // Import modules
             let modules = modules |> Array.filter (String.IsNullOrWhiteSpace >> not)
             if not <| Array.isEmpty modules then
                 initState.ImportPSModule(modules);
 
+//            for p in initState.Providers do
+//                printfn "%s %s" p.Name p.ImplementingType.FullName
+
             let rs = RunspaceFactory.CreateRunspace(initState)
+//            let rs = RunspaceFactory.CreateRunspace()
             Thread.CurrentPrincipal <- GenericPrincipal(GenericIdentity("PowerShellTypeProvider"), null)
+
+
+
             rs.Open()
+
+
+            modules |> Array.iter rs.ImportModule
+//            rs.ImportModule @"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Hyper-V\1.1\Hyper-V.psd1"
             rs
         with
         | e -> failwithf "Could not create PowerShell Runspace: '%s'" e.Message
     let commandInfos =
         //Get-Command -CommandType @("cmdlet","function") -ListImported
-        PowerShell.Create(Runspace=runSpace)
-          .AddCommand("Get-Command")
-          .AddParameter("CommandType", ["cmdlet"; "function"])  // Get only cmdlets and functions (without aliases)
-          .AddParameter("ListImported")                         // Get only commands imported into current runtime
-          .Invoke()
+        use ps = runSpace.CreateCommand("Get-Command")
+                    .AddParameter("CommandType", "cmdlet")  // Get only cmdlets and functions (without aliases)
+//                    .AddParameter("ListImported")                         // Get only commands imported into current runtime
+        ps.InvokeThrow()
         |> Seq.map (fun x ->
             match x.BaseObject with
             | :? CommandInfo as ci -> ci
@@ -64,7 +96,7 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
                                 yield cmdSignature.UniqueID, cmdSignature
                         }
                     else
-                        failwith "Command is not loaded: %A" cmd
+                        failwithf "Command is not loaded: %A" cmd
                 | _ -> failwithf "Unexpected type of command: %A" cmd
             )
             |> Seq.concat
@@ -75,10 +107,9 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
 
     let getXmlDoc(cmdName:string) =
         let result =
-            PowerShell.Create(Runspace=runSpace)
-                .AddCommand("Get-Help")
-                .AddParameter("Name", cmdName)
-                .Invoke()
+            let ps = runSpace.CreateCommand("Get-Help")
+                        .AddParameter("Name", cmdName)
+            ps.InvokeThrow()
             |> Seq.toArray
 
         let (?) (this : PSObject) (prop : string) : obj =
@@ -105,7 +136,7 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
             let cmd = commands.[uniqueId]
 
             // Create and execute PowerShell command
-            let ps = PowerShell.Create(Runspace=runSpace).AddCommand(cmd.Name)
+            use ps = runSpace.CreateCommand(cmd.Name)
             parameters |> Seq.iteri (fun i value->
                 let key, _,ty = cmd.ParametersInfo.[i]
                 match ty with
@@ -119,7 +150,7 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
                     if (value <> null)
                     then ps.AddParameter(key, value) |> ignore
             )
-            let result = ps.Invoke()
+            let result = ps.InvokeThrow()
 
             // Infer type of the result
             match getTypeOfObjects cmd.ResultObjectTypes result with
