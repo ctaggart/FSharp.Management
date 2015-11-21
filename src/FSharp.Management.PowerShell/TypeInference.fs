@@ -51,6 +51,8 @@ let getParameterProperties (parameterSet: CommandParameterSetInfo) =
         |> Seq.toArray
 
 let getPSCommandSignature (command:CommandInfo) (parameterSet:CommandParameterSetInfo) =
+    if command.Name = "Get-VHD" then
+        printf "getPSCommandSignature for Get-VHD"
     let resultObjectTypes = getOutputTypes command
     {
         Name                = command.Name

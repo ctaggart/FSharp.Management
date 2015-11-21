@@ -8,6 +8,8 @@ open System.Management.Automation.Runspaces
 open System.Threading
 open System.Security.Principal
 
+let printfn format = Printf.ksprintf System.Diagnostics.Debug.WriteLine format
+
 type IPSRuntime =
     abstract member AllCommands  : unit -> PSCommandSignature[]
     abstract member Execute     : string * obj seq -> obj
@@ -26,6 +28,19 @@ type PowerShell with
             failwith (sb.ToString())
         o
 
+    /// gets the base objects
+    member x.GetSeq() =
+        x.InvokeThrow() |> Seq.map (fun x -> x.BaseObject)
+
+    /// gets the base objects of a specific type
+    /// Get-Command and Get-Member can be used to figure out the base types
+    member x.GetSeq<'T>() =
+        seq {
+            for o in x.GetSeq() do
+                match o with 
+                | :? 'T as t -> yield t 
+                | _ -> () }
+
 type Runspaces.Runspace with
 
     member x.CreateCommand (cmdlet:string) =
@@ -43,11 +58,11 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
             initState.AuthorizationManager <- new Microsoft.PowerShell.PSAuthorizationManager("Microsoft.PowerShell")
             
             // Import SnapIns
-//            for snapIn in snapIns do
-//                if not <| String.IsNullOrEmpty(snapIn) then
-//                    let _, ex = initState.ImportPSSnapIn(snapIn)
-//                    if ex <> null then
-//                        failwithf "ImportPSSnapInExceptions: %s" ex.Message
+            for snapIn in snapIns do
+                if not <| String.IsNullOrEmpty(snapIn) then
+                    let _, ex = initState.ImportPSSnapIn(snapIn)
+                    if ex <> null then
+                        failwithf "ImportPSSnapInExceptions: %s" ex.Message
 
             // Import modules
             let modules = modules |> Array.filter (String.IsNullOrWhiteSpace >> not)
@@ -60,26 +75,33 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
             let rs = RunspaceFactory.CreateRunspace(initState)
 //            let rs = RunspaceFactory.CreateRunspace()
             Thread.CurrentPrincipal <- GenericPrincipal(GenericIdentity("PowerShellTypeProvider"), null)
-
-
-
             rs.Open()
-
-
-            modules |> Array.iter rs.ImportModule
-//            rs.ImportModule @"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Hyper-V\1.1\Hyper-V.psd1"
+//            modules |> Array.iter rs.ImportModule
+            rs.ImportModule @"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Hyper-V\1.1\Hyper-V.psd1"
             rs
         with
         | e -> failwithf "Could not create PowerShell Runspace: '%s'" e.Message
+
+    do
+        // get the loaded modules
+        use ps = runSpace.CreateCommand("Get-Module")
+        for mi in ps.GetSeq<PSModuleInfo>() do
+            printfn "mi: %s" mi.Name
+            for KeyValue(c,ci) in mi.ExportedCmdlets do
+                if ci.Name = "Get-VHD" then
+                    printfn "%s %A" c ci.OutputType
+
     let commandInfos =
         //Get-Command -CommandType @("cmdlet","function") -ListImported
         use ps = runSpace.CreateCommand("Get-Command")
                     .AddParameter("CommandType", "cmdlet")  // Get only cmdlets and functions (without aliases)
-//                    .AddParameter("ListImported")                         // Get only commands imported into current runtime
+                    .AddParameter("ListImported")                         // Get only commands imported into current runtime
         ps.InvokeThrow()
         |> Seq.map (fun x ->
             match x.BaseObject with
-            | :? CommandInfo as ci -> ci
+            | :? CommandInfo as ci ->
+//                printfn "%s %s %A" ci.ModuleName ci.Name ci.OutputType
+                ci
             | w -> failwithf "Unsupported type of command: %A" w)
         |> Seq.toArray
     let commands =
@@ -104,6 +126,11 @@ type PSRuntimeHosted(snapIns:string[], modules:string[]) =
         with
         | e -> failwithf "Could not load command: %s\n%s" e.Message e.StackTrace
     let allCommands = commands |> Map.toSeq |> Seq.map snd |> Seq.toArray
+
+    do
+        for cmd in allCommands do
+            if cmd.Name = "Get-VHD" then
+                printfn "cmd %s %s %A" cmd.Name cmd.UniqueID cmd.ResultObjectTypes
 
     let getXmlDoc(cmdName:string) =
         let result =
